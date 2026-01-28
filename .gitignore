@@ -1,0 +1,11 @@
+# 생성 결과물
+output/
+
+# OS/에디터
+.DS_Store
+.vscode/
+.idea/
+
+# 로그 및 임시 파일
+*.log
+*.tmp

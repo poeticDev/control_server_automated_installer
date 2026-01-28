@@ -1,0 +1,466 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# ============================================================
+# 출력 색상 설정
+# ============================================================
+# 색상 출력 기본값
+NO_COLOR=''
+RED=''
+CYAN=''
+GREEN=''
+
+# 터미널 색상 지원 여부 확인 https://unix.stackexchange.com/a/10065/642181
+if [ -t 1 ]; then
+    total_colors=$(tput colors)
+    if [[ -n "$total_colors" && $total_colors -ge 8 ]]; then
+        # 색상 코드 설정 https://stackoverflow.com/a/28938235/18954618
+        NO_COLOR='\033[0m'
+        RED='\033[0;31m'
+        CYAN='\033[0;36m'
+        GREEN='\033[0;32m'
+    fi
+fi
+
+# ============================================================
+# 공통 로그/에러 처리
+# ============================================================
+# 로그/에러 처리 함수
+error_log() { echo -e "${RED}오류: $1${NO_COLOR}"; }
+info_log() { echo -e "${CYAN}안내: $1${NO_COLOR}"; }
+error_exit() {
+    error_log "$*"
+    exit 1
+}
+
+# ============================================================
+# 실행 환경 유틸리티
+# ============================================================
+# CPU 아키텍처 감지
+detect_arch() {
+    case $(uname -m) in
+    x86_64) echo "amd64" ;;
+    aarch64 | arm64) echo "arm64" ;;
+    armv7l) echo "arm" ;;
+    i686 | i386) echo "386" ;;
+    *) echo "err" ;;
+    esac
+}
+
+# OS 감지 https://stackoverflow.com/a/18434831/18954618
+detect_os() {
+    case $(uname | tr '[:upper:]' '[:lower:]') in
+    linux*) echo "linux" ;;
+    # darwin*) echo "darwin" ;;
+    *) echo "err" ;;
+    esac
+}
+
+# ============================================================
+# 1) 사전 점검 유틸리티
+# ============================================================
+# 필수 명령어 존재 여부 확인
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || error_exit "필수 명령어가 없습니다: $1"
+}
+
+# 필수 도구와 docker compose v2 지원 확인
+preflight_check() {
+  need_cmd curl
+  need_cmd jq
+  need_cmd unzip
+  need_cmd docker
+
+  if docker compose version >/dev/null 2>&1; then
+    echo " - docker compose 사용 가능"
+  else
+    error_exit "docker compose를 찾을 수 없습니다. Docker Compose v2를 설치하세요."
+  fi
+
+  echo " - 사전 점검 완료"
+}
+
+# ============================================================
+# 2) 최신 릴리즈 가져오기 유틸리티
+# ============================================================
+# GitHub API 호출(토큰 선택)
+github_api() {
+  local url="$1"
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    curl -sSL \
+      -H "Authorization: Bearer $GITHUB_TOKEN" \
+      -H "Accept: application/vnd.github+json" \
+      "$url"
+  else
+    curl -sSL \
+      -H "Accept: application/vnd.github+json" \
+      "$url"
+  fi
+}
+
+# 최신 웹 릴리즈 다운로드 및 API 이미지 가져오기
+fetch_release() {
+  local release_json
+  local tag
+  local asset_name
+  local asset_url
+  local console_dir
+  local tmp_zip
+  local meta_file
+
+  console_dir="$OUTPUT_DIR/console"
+
+  release_json=$(github_api \
+    "https://api.github.com/repos/${WEB_REPO_OWNER}/${WEB_REPO_NAME}/releases/latest")
+
+  tag=$(echo "$release_json" | jq -r '.tag_name')
+
+  if [[ -z "$tag" || "$tag" == "null" ]]; then
+    error_exit "최신 릴리즈 태그를 가져오지 못했습니다"
+  fi
+
+  echo " - 최신 릴리즈 태그: $tag"
+
+  asset_name="web-dashboard_${tag}.zip"
+  asset_url=$(echo "$release_json" \
+    | jq -r --arg NAME "$asset_name" \
+      '.assets[] | select(.name == $NAME) | .browser_download_url')
+
+  if [[ -z "$asset_url" || "$asset_url" == "null" ]]; then
+    error_exit "아티팩트를 찾을 수 없습니다: $asset_name"
+  fi
+
+  echo " - 웹 아티팩트 다운로드 중: $asset_name"
+  mkdir -p "$console_dir"
+  tmp_zip="$(mktemp)"
+  curl -L "$asset_url" -o "$tmp_zip"
+
+  echo " - 웹 아티팩트 압축 해제 중..."
+  rm -rf "$console_dir"/*
+  unzip -q "$tmp_zip" -d "$console_dir"
+  rm "$tmp_zip"
+
+  echo " - API 이미지 가져오는 중: ${API_IMAGE}:${tag}"
+  docker pull "${API_IMAGE}:${tag}"
+
+  meta_file="$OUTPUT_DIR/release-meta.json"
+  jq -n \
+    --arg tag "$tag" \
+    --arg web_repo "${WEB_REPO_OWNER}/${WEB_REPO_NAME}" \
+    --arg api_image "${API_IMAGE}:${tag}" \
+    --arg installed_at "$(date -Iseconds)" \
+    '{
+      version: $tag,
+      web: {
+        repository: $web_repo
+      },
+      api: {
+        image: $api_image
+      },
+      installed_at: $installed_at
+    }' > "$meta_file"
+
+  echo " - 릴리즈 메타데이터 기록 완료: $meta_file"
+}
+
+# ============================================================
+# 3) 템플릿 생성 유틸리티
+# ============================================================
+# 입력값 프롬프트
+prompt() {
+  local var_name="$1"
+  local message="$2"
+  local default="${3:-}"
+  local secret="${4:-false}"
+  local value=""
+
+  if [[ "$secret" == "true" ]]; then
+    if [[ -n "$default" ]]; then
+      read -r -s -p "$message (기본값 숨김): " value
+      echo
+      value="${value:-$default}"
+    else
+      read -r -s -p "$message: " value
+      echo
+    fi
+  else
+    if [[ -n "$default" ]]; then
+      read -r -p "$message [$default]: " value
+      value="${value:-$default}"
+    else
+      read -r -p "$message: " value
+    fi
+  fi
+
+  if [[ -z "$value" ]]; then
+    error_exit "$var_name 값이 필요합니다."
+  fi
+
+  export "$var_name"="$value"
+}
+
+# 배포 설정 파일 생성(Caddy/Compose/Env)
+render_templates() {
+  local docker_out_dir
+  local console_dir
+  local meta_file
+  local default_tag
+  local db_name_default
+  local db_user_default
+  local cors_origin_default
+
+  docker_out_dir="$OUTPUT_DIR/docker"
+  console_dir="$OUTPUT_DIR/console"
+
+  mkdir -p "$docker_out_dir"
+
+  if [[ ! -f "$console_dir/index.html" ]]; then
+    error_exit "웹 콘솔 파일을 찾을 수 없습니다: $console_dir"
+  fi
+
+  prompt BASE_DOMAIN "기본 도메인 (예: example.com)"
+  prompt LE_EMAIL "Let's Encrypt(ACME) 이메일" ""
+
+  CONSOLE_HOST="${CONSOLE_HOST:-console.${BASE_DOMAIN}}"
+  API_HOST="${API_HOST:-api.${BASE_DOMAIN}}"
+
+  db_name_default="mdk_postgres_db"
+  db_user_default="mdk"
+  prompt POSTGRES_DB "Postgres DB 이름" "$db_name_default"
+  prompt POSTGRES_USER "Postgres 사용자" "$db_user_default"
+  prompt POSTGRES_PASSWORD "DB 비밀번호"
+
+  meta_file="$OUTPUT_DIR/release-meta.json"
+  default_tag=""
+  if [[ -f "$meta_file" ]]; then
+    default_tag="$(jq -r '.version // empty' "$meta_file" || true)"
+  fi
+
+  prompt API_IMAGE "API 이미지 이름 (예: ghcr.io/org/dashboard-api)"
+  prompt API_TAG "API 이미지 태그" "${default_tag:-latest}"
+
+  cors_origin_default="https://${CONSOLE_HOST}"
+  prompt CORS_ORIGIN "CORS 허용 Origin (콘솔 URL)" "$cors_origin_default"
+
+  API_PORT="${API_PORT:-3000}"
+
+  export CONSOLE_HOST API_HOST LE_EMAIL CORS_ORIGIN API_PORT
+
+  cat > "$docker_out_dir/db.env" <<EOF
+POSTGRES_DB=${POSTGRES_DB}
+POSTGRES_USER=${POSTGRES_USER}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+EOF
+
+  cat > "$docker_out_dir/server.env" <<EOF
+NODE_ENV=production
+PORT=${API_PORT}
+
+## 공통 DB 설정 ##
+DB_TARGET=local
+POSTGRES_HOST_LOCAL=db
+POSTGRES_PORT_LOCAL=5432
+POSTGRES_DB_LOCAL=${POSTGRES_DB}
+DATABASE_URL_LOCAL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+CORS_ORIGIN=${CORS_ORIGIN}
+EOF
+
+  cat > "$docker_out_dir/Caddyfile" <<EOF
+{
+  email ${LE_EMAIL}
+}
+
+${CONSOLE_HOST} {
+  root * /srv/console
+  file_server
+  encode gzip
+}
+
+${API_HOST} {
+  reverse_proxy dashboard-api:${API_PORT}
+  encode gzip
+}
+EOF
+
+  cat > "$docker_out_dir/docker-compose.yml" <<EOF
+services:
+  caddy:
+    image: caddy
+    container_name: dashboard_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../console:/srv/console:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      dashboard-api:
+        condition: service_healthy
+
+  dashboard-api:
+    image: ${API_IMAGE}:${API_TAG}
+    restart: unless-stopped
+    container_name: dashboard-api
+    env_file:
+      - ./server.env
+    expose:
+      - "${API_PORT}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:${API_PORT}/api/v1/health"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      - db
+
+  db:
+    image: postgres:17
+    container_name: ${POSTGRES_DB}
+    restart: unless-stopped
+    env_file:
+      - ./db.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_data:
+EOF
+
+  echo " - 생성 완료"
+  echo " - $docker_out_dir/docker-compose.yml"
+  echo " - $docker_out_dir/Caddyfile"
+  echo " - $docker_out_dir/server.env"
+  echo " - $docker_out_dir/db.env"
+}
+
+# ============================================================
+# 실행 환경 및 인자 처리
+# ============================================================
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output}"
+TEMPLATES_DIR="${TEMPLATES_DIR:-$ROOT_DIR/templates}"
+
+RUN_AFTER=false
+
+usage() {
+  cat <<EOF
+사용법: ./setup.sh [--run]
+
+옵션:
+  --run   설정 파일 생성 후 docker compose up -d 자동 실행
+EOF
+}
+
+
+for arg in "${@:-}"; do
+  case "$arg" in
+    --run) RUN_AFTER=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) error_log "알 수 없는 옵션: $arg"; usage; exit 1 ;;
+  esac
+done
+
+info_log "대시보드 설치 도우미 시작"
+
+# 루트 권한 확인 https://stackoverflow.com/a/18216122/18954618
+if [ "$EUID" -ne 0 ]; then error_exit "이 스크립트는 루트 사용자로 실행해야 합니다"; fi
+
+
+os="$(detect_os)"
+arch="$(detect_arch)"
+
+if [[ "$os" == "err" ]]; then error_exit "이 스크립트는 리눅스만 지원합니다"; fi
+if [[ "$arch" == "err" ]]; then error_exit "지원하지 않는 CPU 아키텍처입니다"; fi
+
+info_log "단계 0/4: 경로 정보"
+echo " - 루트: $ROOT_DIR"
+echo " - 출력: $OUTPUT_DIR"
+
+mkdir -p "$OUTPUT_DIR"
+
+# ============================================================
+# 단계 1: 사전 점검
+# ============================================================
+info_log "단계 1/4: 사전 점검"
+preflight_check
+
+# ============================================================
+# 단계 2: 최신 릴리즈 자산 가져오기
+# ============================================================
+info_log "단계 2/4: 최신 릴리즈 자산 가져오기"
+# 최신 릴리즈 가져오기는 환경변수를 필요로 함
+# - WEB_REPO_OWNER, WEB_REPO_NAME
+# - API_IMAGE (render_templates에서도 받지만, 여기서는 이미지 가져오기에 필요)
+
+export WEB_REPO_OWNER="poeticDev"
+export WEB_REPO_NAME="mdk_web_dashboard"
+export API_IMAGE="ghcr.io/$WEB_REPO_OWNER/mdk-nest-server"
+
+if [[ -z "${WEB_REPO_OWNER:-}" ]]; then
+  read -r -p "웹 저장소 소유자/조직 (예: your-org): " WEB_REPO_OWNER
+  export WEB_REPO_OWNER
+fi
+if [[ -z "${WEB_REPO_NAME:-}" ]]; then
+  read -r -p "웹 저장소 이름 (예: dashboard-web): " WEB_REPO_NAME
+  export WEB_REPO_NAME
+fi
+
+# API_IMAGE는 fetch_release.sh에서 이미지 가져오기를 수행하므로 여기서도 받아둔다
+if [[ -z "${API_IMAGE:-}" ]]; then
+  read -r -p "API 이미지 (예: ghcr.io/your-org/dashboard-api): " API_IMAGE
+  export API_IMAGE
+fi
+
+export OUTPUT_DIR
+fetch_release
+
+# ============================================================
+# 단계 3: 템플릿 생성 (환경값 + Caddy 설정)
+# ============================================================
+info_log "단계 3/4: 템플릿 생성"
+export OUTPUT_DIR TEMPLATES_DIR
+render_templates
+
+# ============================================================
+# 단계 4: 안내 또는 실행
+# ============================================================
+DOCKER_OUT_DIR="$OUTPUT_DIR/docker"
+
+info_log "단계 4/4: 설치 안내"
+cat <<EOF
+
+✅ 설치 파일 생성 완료
+
+다음 단계:
+  cd "$DOCKER_OUT_DIR"
+  docker compose up -d
+
+접속:
+  - 콘솔: https://console.<your-domain>
+  - API 주소: https://api.<your-domain>
+
+팁:
+  - 컨테이너 상태: docker compose ps
+  - 로그 확인:     docker compose logs -f caddy
+                  docker compose logs -f dashboard-api
+EOF
+
+if [[ "$RUN_AFTER" == "true" ]]; then
+  info_log "추가 실행: docker compose up -d"
+  (cd "$DOCKER_OUT_DIR" && docker compose up -d)
+  echo " - 실행 완료"
+fi
