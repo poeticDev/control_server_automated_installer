@@ -322,6 +322,10 @@ render_templates() {
   CONSOLE_HOST="${CONSOLE_HOST:-console.${BASE_DOMAIN}}"
   API_HOST="${API_HOST:-api.${BASE_DOMAIN}}"
 
+  # LAN IP 감지 (Linux/macOS)
+  detected_ip=$(hostname -I | awk '{print $1}' 2>/dev/null || ipconfig getifaddr en0 2>/dev/null || echo "")
+  prompt LAN_IP "서버 LAN IP (다른 기기 접속용)" "$detected_ip"
+
   db_name_default="mdk_postgres_db"
   db_user_default="mdk"
   prompt POSTGRES_DB "Postgres DB 이름" "$db_name_default"
@@ -363,24 +367,44 @@ EOF
   cat > "$docker_out_dir/Caddyfile" <<EOF
 {
   email ${LE_EMAIL}
+  # 로컬/내부망 사용을 위한 글로벌 설정
+  local_certs
+  skip_install_trust
+  # SNI가 없을 경우 기본적으로 사용할 호스트 설정 (외부 기기 IP 접속 대응)
+  default_sni ${LAN_IP}
 }
 
-${CONSOLE_HOST} {
+# 메인 블록 (LAN IP, localhost 및 설정된 도메인)
+${CONSOLE_HOST}, localhost, ${LAN_IP} {
+  tls internal
   root * /srv/console
   file_server
   encode gzip
 }
 
 ${API_HOST} {
+  tls internal
   reverse_proxy dashboard-api:${API_PORT}
   encode gzip
+}
+
+# Catch-all 블록 (기타 모든 요청 대응)
+:443 {
+  tls internal
+  root * /srv/console
+  file_server
+  encode gzip
+
+  handle_path /api/* {
+    reverse_proxy dashboard-api:${API_PORT}
+  }
 }
 EOF
 
   cat > "$docker_out_dir/docker-compose.yml" <<EOF
 services:
   caddy:
-    image: caddy
+    image: caddy:latest
     container_name: dashboard_caddy
     restart: unless-stopped
     ports:
@@ -404,7 +428,7 @@ services:
     expose:
       - "${API_PORT}"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:${API_PORT}/api/v1/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:${API_PORT}/api/v1/health"]
       interval: 60s
       timeout: 5s
       retries: 3
