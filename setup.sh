@@ -320,11 +320,11 @@ render_templates() {
   detected_ip=$(hostname -I | awk '{print $1}' 2>/dev/null || ipconfig getifaddr en0 2>/dev/null || echo "")
   prompt LAN_IP "서버 LAN IP (다른 기기 접속용)" "$detected_ip"
 
-  db_name_default="mdk_postgres_db"
-  db_user_default="mdk"
+  db_name_default="${POSTGRES_DB:-mdk_postgres_db}"
+  db_user_default="${POSTGRES_USER:-mdk}"
   prompt POSTGRES_DB "Postgres DB 이름" "$db_name_default"
   prompt POSTGRES_USER "Postgres 사용자" "$db_user_default"
-  prompt POSTGRES_PASSWORD "DB 비밀번호"
+  prompt POSTGRES_PASSWORD "DB 비밀번호" "${POSTGRES_PASSWORD:-}"
 
   if [[ -z "${API_IMAGE:-}" ]]; then
     prompt API_IMAGE "API 이미지 이름 (예: ghcr.io/org/dashboard-api)"
