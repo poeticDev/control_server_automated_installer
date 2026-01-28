@@ -316,12 +316,6 @@ render_templates() {
     error_exit "웹 콘솔 파일을 찾을 수 없습니다: $console_dir"
   fi
 
-  prompt BASE_DOMAIN "기본 도메인 (예: example.com)"
-  prompt LE_EMAIL "Let's Encrypt(ACME) 이메일" ""
-
-  CONSOLE_HOST="${CONSOLE_HOST:-console.${BASE_DOMAIN}}"
-  API_HOST="${API_HOST:-api.${BASE_DOMAIN}}"
-
   # LAN IP 감지 (Linux/macOS)
   detected_ip=$(hostname -I | awk '{print $1}' 2>/dev/null || ipconfig getifaddr en0 2>/dev/null || echo "")
   prompt LAN_IP "서버 LAN IP (다른 기기 접속용)" "$detected_ip"
@@ -339,8 +333,8 @@ render_templates() {
     API_TAG="latest"
   fi
 
-  cors_origin_default="https://${CONSOLE_HOST}"
-  prompt CORS_ORIGIN "CORS 허용 Origin (콘솔 URL)" "$cors_origin_default"
+  cors_origin_default="https://${LAN_IP}"
+  prompt CORS_ORIGIN "CORS 허용 Origin (대시보드 접속 주소)" "$cors_origin_default"
 
   API_PORT="${API_PORT:-3000}"
 
@@ -366,7 +360,6 @@ EOF
 
   cat > "$docker_out_dir/Caddyfile" <<EOF
 {
-  email ${LE_EMAIL}
   # 로컬/내부망 사용을 위한 글로벌 설정
   local_certs
   skip_install_trust
@@ -374,30 +367,17 @@ EOF
   default_sni ${LAN_IP}
 }
 
-# 메인 블록 (LAN IP, localhost 및 설정된 도메인)
-${CONSOLE_HOST}, localhost, ${LAN_IP} {
+# 메인 접속 블록 (LAN IP, localhost 및 모든 :443 요청 대응)
+${LAN_IP}, localhost, :443 {
   tls internal
+  encode gzip
+
   root * /srv/console
   file_server
-  encode gzip
-}
 
-${API_HOST} {
-  tls internal
-  reverse_proxy dashboard-api:${API_PORT}
-  encode gzip
-}
-
-# Catch-all 블록 (기타 모든 요청 대응)
-:443 {
-  tls internal
-  root * /srv/console
-  file_server
-  encode gzip
-
-  handle_path /api/* {
-    reverse_proxy dashboard-api:${API_PORT}
-  }
+  # API 프록시 설정 (경로 기반)
+  @api path /api/*
+  reverse_proxy @api dashboard-api:${API_PORT}
 }
 EOF
 
@@ -567,9 +547,9 @@ if [[ "$API_IMAGE" != "$api_image_lower" ]]; then
 fi
 
 
-fetch_web_release
+# fetch_web_release
 pull_api_image
-write_release_meta
+# write_release_meta
 
 # ============================================================
 # 단계 3: 템플릿 생성 (환경값 + Caddy 설정)
