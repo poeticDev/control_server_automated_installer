@@ -32,6 +32,7 @@ docker compose up -d
 ## 연계 프로젝트와 의존성
 - 웹 콘솔 릴리즈 저장소: `WEB_REPO_OWNER/WEB_REPO_NAME` (기본값: `poeticDev/mdk_web_dashboard`)
 - API 이미지: `API_IMAGE` (예: `ghcr.io/<org>/mdk-nest-server`)
+- API 태그: `API_TAG` (미지정 시 `latest`)
 - GitHub 릴리즈 API: `https://api.github.com/repos/<owner>/<repo>/releases/latest`
 
 ## 참고

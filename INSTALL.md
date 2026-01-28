@@ -25,7 +25,7 @@ sudo ./setup.sh
 - `Postgres 사용자`: 기본값 `mdk`
 - `DB 비밀번호`: DB 비밀번호
 - `API 이미지 이름`: 예) `ghcr.io/<org>/mdk-nest-server`
-- `API 이미지 태그`: 릴리즈 버전(기본은 최신)
+- `API 이미지 태그`: 태그 값(미지정 시 `latest`)
 - `CORS 허용 Origin`: 예) `https://console.example.com`
 
 ## 5) 생성 결과물
@@ -55,6 +55,7 @@ sudo ./setup.sh --run
 프롬프트를 줄이고 싶다면 아래 변수를 미리 export한다.
 - `WEB_REPO_OWNER`, `WEB_REPO_NAME`: 웹 콘솔 릴리즈 저장소
 - `API_IMAGE`: API 이미지 경로
+- `API_TAG`: API 이미지 태그(미지정 시 `latest`)
 - `OUTPUT_DIR`, `TEMPLATES_DIR`: 출력/템플릿 경로
 - `CONSOLE_HOST`, `API_HOST`, `API_PORT`, `CORS_ORIGIN`
 - `GITHUB_TOKEN`: 프라이빗 레포 접근 시 필요

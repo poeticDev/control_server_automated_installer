@@ -52,7 +52,7 @@ detect_arch() {
 detect_os() {
     case $(uname | tr '[:upper:]' '[:lower:]') in
     linux*) echo "linux" ;;
-    # darwin*) echo "darwin" ;;
+    darwin*) echo "darwin" ;;
     *) echo "err" ;;
     esac
 }
@@ -84,12 +84,97 @@ preflight_check() {
 # ============================================================
 # 2) 최신 릴리즈 가져오기 유틸리티
 # ============================================================
+# ISO 8601 타임스탬프 생성(리눅스/맥 호환)
+iso_timestamp() {
+  if date -Iseconds >/dev/null 2>&1; then
+    date -Iseconds
+  else
+    date -u +"%Y-%m-%dT%H:%M:%S%z"
+  fi
+}
+
+# 이미지 이름 소문자 변환(Docker 규칙)
+to_lowercase() {
+  echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# 최신 릴리즈 태그 조회
+get_latest_release_tag() {
+  local owner="$1"
+  local repo="$2"
+  local token="${3:-}"
+  local release_json
+  local tag
+
+  release_json=$(github_api \
+    "https://api.github.com/repos/${owner}/${repo}/releases/latest" \
+    "$token")
+
+  tag=$(echo "$release_json" | jq -r '.tag_name')
+
+  if [[ -z "$tag" || "$tag" == "null" ]]; then
+    error_exit "최신 릴리즈 태그를 가져오지 못했습니다: ${owner}/${repo}"
+  fi
+
+  echo "$tag"
+}
+
+# GHCR 로그인 상태 확인 및 필요 시 토큰 로그인
+ensure_ghcr_login() {
+  local require_token="${1:-false}"
+  local docker_config
+  local config_path
+  local ghcr_username
+  local ghcr_token
+  local is_logged_in="false"
+
+  docker_config="${DOCKER_CONFIG:-$HOME/.docker}"
+  config_path="${docker_config}/config.json"
+
+  if [[ -f "$config_path" ]]; then
+    if jq -e '.auths["ghcr.io"]' "$config_path" >/dev/null 2>&1; then
+      is_logged_in="true"
+    fi
+  fi
+
+  if [[ "$is_logged_in" == "true" ]]; then
+    echo " - GHCR 로그인 확인됨"
+    if [[ "$require_token" == "true" && -z "${GHCR_TOKEN:-}" ]]; then
+      prompt GHCR_TOKEN "GHCR 토큰" "" "true"
+    fi
+    return 0
+  fi
+
+  info_log "GHCR 로그인 필요"
+
+  ghcr_username="${GHCR_USERNAME:-${GITHUB_USERNAME:-${GITHUB_ACTOR:-}}}"
+  if [[ -z "$ghcr_username" ]]; then
+    prompt GHCR_USERNAME "GHCR 사용자 이름" ""
+    ghcr_username="$GHCR_USERNAME"
+  fi
+
+  ghcr_token="${GHCR_TOKEN:-${GITHUB_TOKEN:-}}"
+  if [[ -z "$ghcr_token" ]]; then
+    prompt GHCR_TOKEN "GHCR 토큰" "" "true"
+    ghcr_token="$GHCR_TOKEN"
+  fi
+
+  echo "$ghcr_token" | docker login ghcr.io -u "$ghcr_username" --password-stdin >/dev/null 2>&1 \
+    || error_exit "GHCR 로그인에 실패했습니다. 사용자 이름/토큰 권한을 확인하세요."
+
+  echo " - GHCR 로그인 완료"
+}
+
 # GitHub API 호출(토큰 선택)
 github_api() {
   local url="$1"
-  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  local token="${2:-}"
+  if [[ -z "$token" ]]; then
+    token="${GITHUB_TOKEN:-}"
+  fi
+  if [[ -n "$token" ]]; then
     curl -sSL \
-      -H "Authorization: Bearer $GITHUB_TOKEN" \
+      -H "Authorization: Bearer $token" \
       -H "Accept: application/vnd.github+json" \
       "$url"
   else
@@ -99,36 +184,32 @@ github_api() {
   fi
 }
 
-# 최신 웹 릴리즈 다운로드 및 API 이미지 가져오기
-fetch_release() {
+# 최신 웹 릴리즈 다운로드
+fetch_web_release() {
+  local web_token
   local release_json
   local tag
   local asset_name
   local asset_url
   local console_dir
   local tmp_zip
-  local meta_file
 
   console_dir="$OUTPUT_DIR/console"
 
+  web_token="${GITHUB_TOKEN:-}"
+  WEB_RELEASE_TAG="$(get_latest_release_tag "$WEB_REPO_OWNER" "$WEB_REPO_NAME" "$web_token")"
+  echo " - 최신 웹 릴리즈 태그: $WEB_RELEASE_TAG"
+
+  asset_name="web-dashboard_${WEB_RELEASE_TAG}.zip"
   release_json=$(github_api \
-    "https://api.github.com/repos/${WEB_REPO_OWNER}/${WEB_REPO_NAME}/releases/latest")
-
-  tag=$(echo "$release_json" | jq -r '.tag_name')
-
-  if [[ -z "$tag" || "$tag" == "null" ]]; then
-    error_exit "최신 릴리즈 태그를 가져오지 못했습니다"
-  fi
-
-  echo " - 최신 릴리즈 태그: $tag"
-
-  asset_name="web-dashboard_${tag}.zip"
+    "https://api.github.com/repos/${WEB_REPO_OWNER}/${WEB_REPO_NAME}/releases/latest" \
+    "$web_token")
   asset_url=$(echo "$release_json" \
     | jq -r --arg NAME "$asset_name" \
       '.assets[] | select(.name == $NAME) | .browser_download_url')
 
   if [[ -z "$asset_url" || "$asset_url" == "null" ]]; then
-    error_exit "아티팩트를 찾을 수 없습니다: $asset_name"
+    error_exit "웹 아티팩트를 찾을 수 없습니다: $asset_name"
   fi
 
   echo " - 웹 아티팩트 다운로드 중: $asset_name"
@@ -140,23 +221,41 @@ fetch_release() {
   rm -rf "$console_dir"/*
   unzip -q "$tmp_zip" -d "$console_dir"
   rm "$tmp_zip"
+}
 
-  echo " - API 이미지 가져오는 중: ${API_IMAGE}:${tag}"
-  docker pull "${API_IMAGE}:${tag}"
+# API 이미지 가져오기
+pull_api_image() {
+  if [[ -z "${API_TAG:-}" ]]; then
+    API_TAG="latest"
+  fi
+
+  ensure_ghcr_login
+
+  echo " - API 이미지 가져오는 중: ${API_IMAGE}:${API_TAG}"
+  if ! docker pull "${API_IMAGE}:${API_TAG}"; then
+    error_exit "API 이미지 다운로드 실패: ${API_IMAGE}:${API_TAG}"
+  fi
+}
+
+# 릴리즈 메타데이터 기록
+write_release_meta() {
+  local meta_file
 
   meta_file="$OUTPUT_DIR/release-meta.json"
   jq -n \
-    --arg tag "$tag" \
+    --arg web_tag "${WEB_RELEASE_TAG:-}" \
     --arg web_repo "${WEB_REPO_OWNER}/${WEB_REPO_NAME}" \
-    --arg api_image "${API_IMAGE}:${tag}" \
-    --arg installed_at "$(date -Iseconds)" \
+    --arg api_image "${API_IMAGE}:${API_TAG}" \
+    --arg api_tag "${API_TAG}" \
+    --arg installed_at "$(iso_timestamp)" \
     '{
-      version: $tag,
       web: {
-        repository: $web_repo
+        repository: $web_repo,
+        tag: $web_tag
       },
       api: {
-        image: $api_image
+        image: $api_image,
+        tag: $api_tag
       },
       installed_at: $installed_at
     }' > "$meta_file"
@@ -197,15 +296,13 @@ prompt() {
     error_exit "$var_name 값이 필요합니다."
   fi
 
-  export "$var_name"="$value"
+  printf -v "$var_name" '%s' "$value"
 }
 
 # 배포 설정 파일 생성(Caddy/Compose/Env)
 render_templates() {
   local docker_out_dir
   local console_dir
-  local meta_file
-  local default_tag
   local db_name_default
   local db_user_default
   local cors_origin_default
@@ -231,21 +328,18 @@ render_templates() {
   prompt POSTGRES_USER "Postgres 사용자" "$db_user_default"
   prompt POSTGRES_PASSWORD "DB 비밀번호"
 
-  meta_file="$OUTPUT_DIR/release-meta.json"
-  default_tag=""
-  if [[ -f "$meta_file" ]]; then
-    default_tag="$(jq -r '.version // empty' "$meta_file" || true)"
+  if [[ -z "${API_IMAGE:-}" ]]; then
+    prompt API_IMAGE "API 이미지 이름 (예: ghcr.io/org/dashboard-api)"
   fi
-
-  prompt API_IMAGE "API 이미지 이름 (예: ghcr.io/org/dashboard-api)"
-  prompt API_TAG "API 이미지 태그" "${default_tag:-latest}"
+  if [[ -z "${API_TAG:-}" ]]; then
+    API_TAG="latest"
+  fi
 
   cors_origin_default="https://${CONSOLE_HOST}"
   prompt CORS_ORIGIN "CORS 허용 Origin (콘솔 URL)" "$cors_origin_default"
 
   API_PORT="${API_PORT:-3000}"
 
-  export CONSOLE_HOST API_HOST LE_EMAIL CORS_ORIGIN API_PORT
 
   cat > "$docker_out_dir/db.env" <<EOF
 POSTGRES_DB=${POSTGRES_DB}
@@ -351,6 +445,13 @@ EOF
 # 실행 환경 및 인자 처리
 # ============================================================
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -f "$ROOT_DIR/installer.env" ]]; then
+  set -a
+  source "$ROOT_DIR/installer.env"
+  set +a
+fi
+
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output}"
 TEMPLATES_DIR="${TEMPLATES_DIR:-$ROOT_DIR/templates}"
 
@@ -366,7 +467,7 @@ EOF
 }
 
 
-for arg in "${@:-}"; do
+for arg in "$@"; do
   case "$arg" in
     --run) RUN_AFTER=true ;;
     -h|--help) usage; exit 0 ;;
@@ -383,8 +484,20 @@ if [ "$EUID" -ne 0 ]; then error_exit "이 스크립트는 루트 사용자로 �
 os="$(detect_os)"
 arch="$(detect_arch)"
 
-if [[ "$os" == "err" ]]; then error_exit "이 스크립트는 리눅스만 지원합니다"; fi
+if [[ "$os" == "err" ]]; then error_exit "지원하지 않는 운영체제입니다"; fi
 if [[ "$arch" == "err" ]]; then error_exit "지원하지 않는 CPU 아키텍처입니다"; fi
+
+if [[ "$os" == "linux" ]]; then
+  if [ "$EUID" -ne 0 ]; then
+    info_log "루트 권한 없이 실행합니다. Docker 권한이 없으면 sudo로 실행하세요."
+  fi
+fi
+
+if [[ "$os" == "darwin" ]]; then
+  if [ "$EUID" -eq 0 ]; then
+    info_log "macOS에서는 루트 실행 시 Docker 접근이 제한될 수 있습니다. 일반 사용자로 실행하세요."
+  fi
+fi
 
 info_log "단계 0/4: 경로 정보"
 echo " - 루트: $ROOT_DIR"
@@ -404,35 +517,40 @@ preflight_check
 info_log "단계 2/4: 최신 릴리즈 자산 가져오기"
 # 최신 릴리즈 가져오기는 환경변수를 필요로 함
 # - WEB_REPO_OWNER, WEB_REPO_NAME
-# - API_IMAGE (render_templates에서도 받지만, 여기서는 이미지 가져오기에 필요)
+# - API_IMAGE (이미지 가져오기)
+# - API_TAG (지정하지 않으면 latest 사용)
 
-export WEB_REPO_OWNER="poeticDev"
-export WEB_REPO_NAME="mdk_web_dashboard"
-export API_IMAGE="ghcr.io/$WEB_REPO_OWNER/mdk-nest-server"
+WEB_REPO_OWNER="poeticDev"
+WEB_REPO_NAME="mdk_web_dashboard"
+
 
 if [[ -z "${WEB_REPO_OWNER:-}" ]]; then
   read -r -p "웹 저장소 소유자/조직 (예: your-org): " WEB_REPO_OWNER
-  export WEB_REPO_OWNER
 fi
 if [[ -z "${WEB_REPO_NAME:-}" ]]; then
   read -r -p "웹 저장소 이름 (예: dashboard-web): " WEB_REPO_NAME
-  export WEB_REPO_NAME
 fi
 
-# API_IMAGE는 fetch_release.sh에서 이미지 가져오기를 수행하므로 여기서도 받아둔다
 if [[ -z "${API_IMAGE:-}" ]]; then
-  read -r -p "API 이미지 (예: ghcr.io/your-org/dashboard-api): " API_IMAGE
-  export API_IMAGE
+  web_repo_owner_lower="$(to_lowercase "$WEB_REPO_OWNER")"
+  API_IMAGE="ghcr.io/$web_repo_owner_lower/mdk-nest-server"
 fi
 
-export OUTPUT_DIR
-fetch_release
+api_image_lower="$(to_lowercase "$API_IMAGE")"
+if [[ "$API_IMAGE" != "$api_image_lower" ]]; then
+  info_log "API 이미지 이름에 대문자가 있어 소문자로 변환합니다."
+  API_IMAGE="$api_image_lower"
+fi
+
+
+fetch_web_release
+pull_api_image
+write_release_meta
 
 # ============================================================
 # 단계 3: 템플릿 생성 (환경값 + Caddy 설정)
 # ============================================================
 info_log "단계 3/4: 템플릿 생성"
-export OUTPUT_DIR TEMPLATES_DIR
 render_templates
 
 # ============================================================
