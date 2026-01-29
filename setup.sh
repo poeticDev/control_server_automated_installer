@@ -354,6 +354,8 @@ DB_TARGET=local
 POSTGRES_HOST_LOCAL=db
 POSTGRES_PORT_LOCAL=5432
 POSTGRES_DB_LOCAL=${POSTGRES_DB}
+# Drizzle 및 백엔드에서 공용으로 사용할 URL
+DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
 DATABASE_URL_LOCAL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
 CORS_ORIGIN=${CORS_ORIGIN}
 EOF
@@ -408,11 +410,12 @@ services:
     expose:
       - "${API_PORT}"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${API_PORT}/api/v1/health"]
-      interval: 60s
+      # Alpine 기반 이미지에서도 동작하도록 wget 사용 (curl 부재 대비)
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:${API_PORT}/api/v1/health || exit 1"]
+      interval: 30s
       timeout: 5s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 30s
     depends_on:
       - db
 
@@ -547,9 +550,9 @@ if [[ "$API_IMAGE" != "$api_image_lower" ]]; then
 fi
 
 
-# fetch_web_release
+fetch_web_release
 pull_api_image
-# write_release_meta
+write_release_meta
 
 # ============================================================
 # 단계 3: 템플릿 생성 (환경값 + Caddy 설정)
