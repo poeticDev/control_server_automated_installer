@@ -200,7 +200,7 @@ fetch_web_release() {
   WEB_RELEASE_TAG="$(get_latest_release_tag "$WEB_REPO_OWNER" "$WEB_REPO_NAME" "$web_token")"
   echo " - 최신 웹 릴리즈 태그: $WEB_RELEASE_TAG"
 
-  asset_name="web-dashboard_${WEB_RELEASE_TAG}.zip"
+  asset_name="mdk_web_dashboard_${WEB_RELEASE_TAG}.zip"
   release_json=$(github_api \
     "https://api.github.com/repos/${WEB_REPO_OWNER}/${WEB_REPO_NAME}/releases/latest" \
     "$web_token")
@@ -411,7 +411,8 @@ services:
       - "${API_PORT}"
     healthcheck:
       # Alpine 기반 이미지에서도 동작하도록 wget 사용 (curl 부재 대비)
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:${API_PORT}/api/v1/health || exit 1"]
+      # /api/v1/health는 내부 DB 상태에 따라 503을 뱉을 수 있으므로, 앱 가동 자체만 체크하는 /api/v1으로 변경
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:${API_PORT}/api/v1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5
