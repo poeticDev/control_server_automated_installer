@@ -22,6 +22,10 @@ chmod +x setup.sh
 ```bash
 sudo ./setup.sh
 ```
+또는 다음 단계 **생성된 배포 파일 확인 및 실행** 자동실행까지
+```bash
+sudo ./setup.sh --run
+```
 
 3) 생성된 배포 파일 확인 및 실행
 ```bash

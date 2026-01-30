@@ -351,12 +351,15 @@ PORT=${API_PORT}
 
 ## 공통 DB 설정 ##
 DB_TARGET=local
-POSTGRES_HOST_LOCAL=db
-POSTGRES_PORT_LOCAL=5432
-POSTGRES_DB_LOCAL=${POSTGRES_DB}
+POSTGRES_HOST=db
+POSTGRES_PORT=5432
+POSTGRES_DB=${POSTGRES_DB}
+POSTGRES_USER=${POSTGRES_USER}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+
 # Drizzle 및 백엔드에서 공용으로 사용할 URL
 DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-DATABASE_URL_LOCAL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+DB_SSL_MODE=disable
 CORS_ORIGIN=${CORS_ORIGIN}
 EOF
 
@@ -411,8 +414,7 @@ services:
       - "${API_PORT}"
     healthcheck:
       # Alpine 기반 이미지에서도 동작하도록 wget 사용 (curl 부재 대비)
-      # /api/v1/health는 내부 DB 상태에 따라 503을 뱉을 수 있으므로, 앱 가동 자체만 체크하는 /api/v1으로 변경
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:${API_PORT}/api/v1 || exit 1"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:${API_PORT}/api/v1/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5
